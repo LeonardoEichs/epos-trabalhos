@@ -30,35 +30,7 @@ index 326a39f..b9194c6 100644
  };
  
  __END_SYS
-diff --git a/include/system/config.h b/include/system/config.h
-index 2bfcfc8..0c12018 100644
---- a/include/system/config.h
-+++ b/include/system/config.h
-@@ -7,15 +7,15 @@
- // ARCHITECTURE, MACHINE, AND APPLICATION SELECTION
- // This section is generated automatically from makedefs by $EPOS/etc/makefile
- //============================================================================
--#define MODE xxx
--#define ARCH xxx
--#define MACH xxx
--#define MMOD xxx
--#define APPL xxx
--#define __mode_xxx__
--#define __arch_xxx__
--#define __mach_xxx__
--#define __mmod_xxx__
-+#define MODE library
-+#define ARCH ia32
-+#define MACH pc
-+#define MMOD legacy
-+#define APPL philosophers_dinner
-+#define __mode_library__
-+#define __arch_ia32__
-+#define __mach_pc__
-+#define __mmod_legacy__
- 
- #if defined (__arch_avr__) || defined (__mmod_lm3s811__)
- #define __no_networking__
+
 diff --git a/include/thread.h b/include/thread.h
 index 28888ae..e52b967 100644
 --- a/include/thread.h
