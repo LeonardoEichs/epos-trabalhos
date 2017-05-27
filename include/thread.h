@@ -119,6 +119,7 @@ private:
     static Thread * volatile _running;
     static Queue _ready;
     static Queue _suspended;
+    Queue _joining;
 };
 
 
