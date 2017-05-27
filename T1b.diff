@@ -1,0 +1,53 @@
+diff --git a/include/thread.h b/include/thread.h
+index e52b967..c9d775c 100644
+--- a/include/thread.h
++++ b/include/thread.h
+@@ -119,6 +119,7 @@ private:
+     static Thread * volatile _running;
+     static Queue _ready;
+     static Queue _suspended;
++    Queue _joining;
+ };
+ 
+ 
+diff --git a/src/abstraction/thread.cc b/src/abstraction/thread.cc
+index 672f8d0..4a1c9fc 100644
+--- a/src/abstraction/thread.cc
++++ b/src/abstraction/thread.cc
+@@ -76,8 +76,21 @@ int Thread::join()
+ 
+     db<Thread>(TRC) << "Thread::join(this=" << this << ",state=" << _state << ")" << endl;
+ 
+-    while(_state != FINISHING)
+-        yield(); // implicit unlock()
++    if (_state != FINISHING) {
++        if (!_ready.empty()) {
++            Thread * prev = _running;
++            prev->_state = WAITING;
++            this->_joining.insert(&prev->_link);
++
++            _running = _ready.remove()->object();
++            _running->_state = RUNNING;
++
++            dispatch();
++        }
++        else {
++            idle();
++        }
++    }
+ 
+     unlock();
+ 
+@@ -177,6 +190,12 @@ void Thread::exit(int status)
+ 
+     lock();
+ 
++    while (!_running->_joining.empty()) {
++        Thread* joined = _running->_joining.remove()->object();
++        joined->_state = READY;
++        _ready.insert(&joined->_link);
++    }
++
+     if(!_ready.empty()) {
+         Thread * prev = _running;
+         prev->_state = FINISHING;

@@ -32,7 +32,7 @@ index 326a39f..b9194c6 100644
  __END_SYS
 
 diff --git a/include/thread.h b/include/thread.h
-index 28888ae..e52b967 100644
+index 28888ae..c9d775c 100644
 --- a/include/thread.h
 +++ b/include/thread.h
 @@ -92,6 +92,10 @@ protected:
@@ -54,7 +54,13 @@ index 28888ae..e52b967 100644
      Queue::Element _link;
  
      static Scheduler_Timer * _timer;
-@@ -119,7 +124,7 @@ private:
+@@ -114,12 +119,13 @@ private:
+     static Thread * volatile _running;
+     static Queue _ready;
+     static Queue _suspended;
++    Queue _joining;
+ };
+ 
  
  template<typename ... Tn>
  inline Thread::Thread(int (* entry)(Tn ...), Tn ... an)
@@ -63,7 +69,7 @@ index 28888ae..e52b967 100644
  {
      constructor_prolog(STACK_SIZE);
      _context = CPU::init_stack(_stack + STACK_SIZE, &__exit, entry, an ...);
-@@ -128,7 +133,7 @@ inline Thread::Thread(int (* entry)(Tn ...), Tn ... an)
+@@ -128,7 +134,7 @@ inline Thread::Thread(int (* entry)(Tn ...), Tn ... an)
  
  template<typename ... Tn>
  inline Thread::Thread(const Configuration & conf, int (* entry)(Tn ...), Tn ... an)
@@ -136,7 +142,7 @@ index a2e8f7a..be3b845 100644
  
  __END_SYS
 diff --git a/src/abstraction/thread.cc b/src/abstraction/thread.cc
-index a398d0b..672f8d0 100644
+index a398d0b..4a1c9fc 100644
 --- a/src/abstraction/thread.cc
 +++ b/src/abstraction/thread.cc
 @@ -61,6 +61,9 @@ Thread::~Thread()
@@ -149,7 +155,44 @@ index a398d0b..672f8d0 100644
      unlock();
  
      kfree(_stack);
-@@ -197,6 +200,66 @@ void Thread::exit(int status)
+@@ -73,8 +76,21 @@ int Thread::join()
+ 
+     db<Thread>(TRC) << "Thread::join(this=" << this << ",state=" << _state << ")" << endl;
+ 
+-    while(_state != FINISHING)
+-        yield(); // implicit unlock()
++    if (_state != FINISHING) {
++        if (!_ready.empty()) {
++            Thread * prev = _running;
++            prev->_state = WAITING;
++            this->_joining.insert(&prev->_link);
++
++            _running = _ready.remove()->object();
++            _running->_state = RUNNING;
++
++            dispatch();
++        }
++        else {
++            idle();
++        }
++    }
+ 
+     unlock();
+ 
+@@ -174,6 +190,12 @@ void Thread::exit(int status)
+ 
+     lock();
+ 
++    while (!_running->_joining.empty()) {
++        Thread* joined = _running->_joining.remove()->object();
++        joined->_state = READY;
++        _ready.insert(&joined->_link);
++    }
++
+     if(!_ready.empty()) {
+         Thread * prev = _running;
+         prev->_state = FINISHING;
+@@ -197,6 +219,66 @@ void Thread::exit(int status)
      unlock();
  }
  
