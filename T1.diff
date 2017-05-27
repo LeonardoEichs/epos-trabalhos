@@ -1,0 +1,246 @@
+diff --git a/include/synchronizer.h b/include/synchronizer.h
+index 326a39f..b9194c6 100644
+--- a/include/synchronizer.h
++++ b/include/synchronizer.h
+@@ -11,7 +11,11 @@ __BEGIN_SYS
+ class Synchronizer_Common
+ {
+ protected:
++    typedef Thread::Queue Queue;
++
++protected:
+     Synchronizer_Common() {}
++    ~Synchronizer_Common() {begin_atomic(); wakeup_all();}
+ 
+     // Atomic operations
+     bool tsl(volatile bool & lock) { return CPU::tsl(lock); }
+@@ -22,9 +26,12 @@ protected:
+     void begin_atomic() { Thread::lock(); }
+     void end_atomic() { Thread::unlock(); }
+ 
+-    void sleep() { Thread::yield(); } // implicit unlock()
+-    void wakeup() { end_atomic(); }
+-    void wakeup_all() { end_atomic(); }
++    void sleep() { Thread::sleep(&_queue); }
++    void wakeup() { Thread::wakeup(&_queue); }
++    void wakeup_all() { Thread::wakeup_all(&_queue); }
++
++protected:
++    Queue _queue;
+ };
+ 
+ __END_SYS
+diff --git a/include/system/config.h b/include/system/config.h
+index 2bfcfc8..0c12018 100644
+--- a/include/system/config.h
++++ b/include/system/config.h
+@@ -7,15 +7,15 @@
+ // ARCHITECTURE, MACHINE, AND APPLICATION SELECTION
+ // This section is generated automatically from makedefs by $EPOS/etc/makefile
+ //============================================================================
+-#define MODE xxx
+-#define ARCH xxx
+-#define MACH xxx
+-#define MMOD xxx
+-#define APPL xxx
+-#define __mode_xxx__
+-#define __arch_xxx__
+-#define __mach_xxx__
+-#define __mmod_xxx__
++#define MODE library
++#define ARCH ia32
++#define MACH pc
++#define MMOD legacy
++#define APPL philosophers_dinner
++#define __mode_library__
++#define __arch_ia32__
++#define __mach_pc__
++#define __mmod_legacy__
+ 
+ #if defined (__arch_avr__) || defined (__mmod_lm3s811__)
+ #define __no_networking__
+diff --git a/include/thread.h b/include/thread.h
+index 28888ae..e52b967 100644
+--- a/include/thread.h
++++ b/include/thread.h
+@@ -92,6 +92,10 @@ protected:
+     static void unlock() { CPU::int_enable(); }
+     static bool locked() { return CPU::int_disabled(); }
+ 
++    static void sleep(Queue * q);
++    static void wakeup(Queue * q);
++    static void wakeup_all(Queue * q);
++
+     static void reschedule();
+     static void time_slicer(const IC::Interrupt_Id & interrupt);
+ 
+@@ -106,6 +110,7 @@ protected:
+     char * _stack;
+     Context * volatile _context;
+     volatile State _state;
++    Queue * _waiting;
+     Queue::Element _link;
+ 
+     static Scheduler_Timer * _timer;
+@@ -119,7 +124,7 @@ private:
+ 
+ template<typename ... Tn>
+ inline Thread::Thread(int (* entry)(Tn ...), Tn ... an)
+-: _state(READY), _link(this, NORMAL)
++: _state(READY), _waiting(0), _link(this, NORMAL)
+ {
+     constructor_prolog(STACK_SIZE);
+     _context = CPU::init_stack(_stack + STACK_SIZE, &__exit, entry, an ...);
+@@ -128,7 +133,7 @@ inline Thread::Thread(int (* entry)(Tn ...), Tn ... an)
+ 
+ template<typename ... Tn>
+ inline Thread::Thread(const Configuration & conf, int (* entry)(Tn ...), Tn ... an)
+-: _state(conf.state), _link(this, conf.priority)
++: _state(conf.state), _waiting(0), _link(this, conf.priority)
+ {
+     constructor_prolog(conf.stack_size);
+     _context = CPU::init_stack(_stack + conf.stack_size, &__exit, entry, an ...);
+diff --git a/src/abstraction/mutex.cc b/src/abstraction/mutex.cc
+index 7345f5c..e2dd277 100644
+--- a/src/abstraction/mutex.cc
++++ b/src/abstraction/mutex.cc
+@@ -22,8 +22,7 @@ void Mutex::lock()
+ 
+     begin_atomic();
+     if(tsl(_locked))
+-        while(tsl(_locked))
+-            sleep(); // implicit end_atomic()
++        sleep();
+     else
+         end_atomic();
+ }
+@@ -34,8 +33,13 @@ void Mutex::unlock()
+     db<Synchronizer>(TRC) << "Mutex::unlock(this=" << this << ")" << endl;
+ 
+     begin_atomic();
+-    _locked = false;
+-    wakeup(); // implicit end_atomic()
++    if (_queue.empty()) {
++        _locked = false;
++        end_atomic();
++    }
++    else {
++        wakeup();
++    }
+ }
+ 
+ __END_SYS
+diff --git a/src/abstraction/semaphore.cc b/src/abstraction/semaphore.cc
+index a2e8f7a..be3b845 100644
+--- a/src/abstraction/semaphore.cc
++++ b/src/abstraction/semaphore.cc
+@@ -20,9 +20,11 @@ void Semaphore::p()
+ {
+     db<Synchronizer>(TRC) << "Semaphore::p(this=" << this << ",value=" << _value << ")" << endl;
+ 
+-    fdec(_value);
+-    while(_value < 0)
++    begin_atomic();
++    if(fdec(_value) < 1)
+         sleep();
++    else
++        end_atomic();
+ }
+ 
+ 
+@@ -30,9 +32,12 @@ void Semaphore::v()
+ {
+     db<Synchronizer>(TRC) << "Semaphore::v(this=" << this << ",value=" << _value << ")" << endl;
+ 
+-    finc(_value);
+-    if(_value < 1)
++    begin_atomic();
++    if (finc(_value) < 0)
+         wakeup();
++    else
++        end_atomic();
++
+ }
+ 
+ __END_SYS
+diff --git a/src/abstraction/thread.cc b/src/abstraction/thread.cc
+index a398d0b..672f8d0 100644
+--- a/src/abstraction/thread.cc
++++ b/src/abstraction/thread.cc
+@@ -61,6 +61,9 @@ Thread::~Thread()
+     _ready.remove(this);
+     _suspended.remove(this);
+ 
++    if (_waiting)
++        _waiting->remove(this);
++
+     unlock();
+ 
+     kfree(_stack);
+@@ -197,6 +200,66 @@ void Thread::exit(int status)
+     unlock();
+ }
+ 
++void Thread::sleep(Queue * q) {
++    
++    db<Thread>(TRC) << "Thread::sleep(running=" << running() << ",q=" << q << ")" << endl;
++
++    assert(locked());
++
++    while (_ready.empty())
++        idle();
++
++    Thread * prev = running();
++    prev->_state = WAITING;
++    prev->_waiting = q;
++    q->insert(&prev->_link);
++
++    _running = _ready.remove()->object();
++    _running->_state = RUNNING;
++
++    dispatch(prev, _running);
++
++    unlock();
++}
++
++void Thread::wakeup(Queue * q) {
++
++    db<Thread>(TRC) << "Thread::wakeup(running=" << running() << ",q=" << q << ")" << endl;
++
++    assert(locked());
++
++    if (!q->empty()) {
++        Thread * t = q->remove()->object();
++        t->_state = READY;
++        t->_waiting = 0;
++        _ready.insert(&t->_link);
++    }
++
++    unlock();
++
++    if (preemptive)
++        reschedule();
++
++}
++
++void Thread::wakeup_all(Queue * q) {
++
++    db<Thread>(TRC) << "Thread::wakeup_all(running=" << running() << ",q=" << q << ")" << endl;
++
++    assert(locked());
++
++    while (!q->empty()) {
++        Thread * t = q->remove()->object();
++        t->_state = READY;
++        t->_waiting = 0;
++        _ready.insert(&t->_link);
++    }
++
++    unlock();
++
++    if (preemptive)
++        reschedule();
++}
+ 
+ void Thread::reschedule()
+ {
