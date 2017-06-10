@@ -12,6 +12,8 @@ extern "C" { void __exit(); }
 
 __BEGIN_SYS
 
+class IdleThread;
+
 class Thread
 {
     friend class Init_First;
@@ -45,7 +47,8 @@ public:
     enum {
         HIGH = 0,
         NORMAL = 15,
-        LOW = 31
+        LOW = 31,
+        IDLE = -1
     };
 
     // Thread Configuration
@@ -101,7 +104,6 @@ protected:
 
     static void dispatch(Thread * prev, Thread * next);
 
-    static int idle();
 
 private:
     static void init();
@@ -118,6 +120,7 @@ protected:
 private:
     static Thread * volatile _running;
     static Queue _ready;
+    static Thread * _idleThread;
     static Queue _suspended;
     Queue _joining;
 };

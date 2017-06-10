@@ -3,6 +3,7 @@
 #include <system/kmalloc.h>
 #include <system.h>
 #include <thread.h>
+#include <idle_thread.h>
 #include <alarm.h>
 
 __BEGIN_SYS
@@ -17,6 +18,9 @@ void Thread::init()
     // neither by IDLE (which has a lower priority)
     if(preemptive)
         _timer = new (kmalloc(sizeof(Scheduler_Timer))) Scheduler_Timer(QUANTUM, time_slicer);
+    Thread idleThread = IdleThread();
+    Thread::_idleThread = &idleThread;
+    Thread::_ready.insert(&Thread::_idleThread->_link);
 }
 
 __END_SYS
