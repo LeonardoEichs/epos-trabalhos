@@ -1,0 +1,300 @@
+diff --git a/include/idle_thread.h b/include/idle_thread.h
+new file mode 100644
+index 0000000..82b485a
+--- /dev/null
++++ b/include/idle_thread.h
+@@ -0,0 +1,32 @@
++// EPOS Thread Abstraction Declarations
++
++#ifndef __idle_thread_h
++#define __idle_thread_h
++
++#include <thread.h>
++
++extern "C" { void __exit(); }
++
++__BEGIN_SYS
++
++class IdleThread : public Thread {
++private:
++    static const unsigned int priority = Thread::IDLE;
++    static const Thread::State state = Thread::READY;
++    static int do_nothing() {
++        while (true) {
++            CPU::int_enable();
++            CPU::halt();
++        }
++        return 0;
++    }
++
++public:
++
++    IdleThread() :
++    Thread(Thread::Configuration(state, priority), &do_nothing) {}
++};
++
++__END_SYS
++
++#endif
+diff --git a/include/thread.h b/include/thread.h
+index c9d775c..d5ca33a 100644
+--- a/include/thread.h
++++ b/include/thread.h
+@@ -12,6 +12,8 @@ extern "C" { void __exit(); }
+ 
+ __BEGIN_SYS
+ 
++class IdleThread;
++
+ class Thread
+ {
+     friend class Init_First;
+@@ -45,7 +47,8 @@ public:
+     enum {
+         HIGH = 0,
+         NORMAL = 15,
+-        LOW = 31
++        LOW = 31,
++        IDLE = -1
+     };
+ 
+     // Thread Configuration
+@@ -101,7 +104,6 @@ protected:
+ 
+     static void dispatch(Thread * prev, Thread * next);
+ 
+-    static int idle();
+ 
+ private:
+     static void init();
+@@ -118,6 +120,7 @@ protected:
+ private:
+     static Thread * volatile _running;
+     static Queue _ready;
++    static Thread * _idleThread;
+     static Queue _suspended;
+     Queue _joining;
+ };
+diff --git a/src/abstraction/thread.cc b/src/abstraction/thread.cc
+index 4a1c9fc..058196c 100644
+--- a/src/abstraction/thread.cc
++++ b/src/abstraction/thread.cc
+@@ -3,6 +3,7 @@
+ #include <system/kmalloc.h>
+ #include <machine.h>
+ #include <thread.h>
++#include <idle_thread.h>
+ 
+ // This_Thread class attributes
+ __BEGIN_UTIL
+@@ -17,6 +18,7 @@ Scheduler_Timer * Thread::_timer;
+ Thread* volatile Thread::_running;
+ Thread::Queue Thread::_ready;
+ Thread::Queue Thread::_suspended;
++Thread* Thread::_idleThread;
+ 
+ // Methods
+ void Thread::constructor_prolog(unsigned int stack_size)
+@@ -26,7 +28,6 @@ void Thread::constructor_prolog(unsigned int stack_size)
+     _stack = reinterpret_cast<char *>(kmalloc(stack_size));
+ }
+ 
+-
+ void Thread::constructor_epilog(const Log_Addr & entry, unsigned int stack_size)
+ {
+     db<Thread>(TRC) << "Thread(entry=" << entry
+@@ -46,7 +47,6 @@ void Thread::constructor_epilog(const Log_Addr & entry, unsigned int stack_size)
+     unlock();
+ }
+ 
+-
+ Thread::~Thread()
+ {
+     lock();
+@@ -69,27 +69,19 @@ Thread::~Thread()
+     kfree(_stack);
+ }
+ 
+-
+ int Thread::join()
+ {
+     lock();
+ 
+     db<Thread>(TRC) << "Thread::join(this=" << this << ",state=" << _state << ")" << endl;
+ 
+-    if (_state != FINISHING) {
+-        if (!_ready.empty()) {
+-            Thread * prev = _running;
+-            prev->_state = WAITING;
+-            this->_joining.insert(&prev->_link);
+-
+-            _running = _ready.remove()->object();
+-            _running->_state = RUNNING;
+-
+-            dispatch();
+-        }
+-        else {
+-            idle();
+-        }
++    while (_state != FINISHING) {
++      Thread * prev = _running;
++      prev->_state = WAITING;
++      this->_joining.insert(&prev->_link);
++      _running = _ready.remove()->object();
++      _running->_state = RUNNING;
++      dispatch(prev, _running);
+     }
+ 
+     unlock();
+@@ -97,7 +89,6 @@ int Thread::join()
+     return *reinterpret_cast<int *>(_stack);
+ }
+ 
+-
+ void Thread::pass()
+ {
+     lock();
+@@ -117,7 +108,6 @@ void Thread::pass()
+     unlock();
+ }
+ 
+-
+ void Thread::suspend()
+ {
+     lock();
+@@ -130,18 +120,16 @@ void Thread::suspend()
+     _state = SUSPENDED;
+     _suspended.insert(&_link);
+ 
+-    if((_running == this) && !_ready.empty()) {
++    if(_running == this) {
+         _running = _ready.remove()->object();
+         _running->_state = RUNNING;
+ 
+         dispatch(this, _running);
+-    } else
+-        idle(); // implicit unlock()
++    }
+ 
+     unlock();
+ }
+ 
+-
+ void Thread::resume()
+ {
+     lock();
+@@ -155,7 +143,6 @@ void Thread::resume()
+    unlock();
+ }
+ 
+-
+ // Class methods
+ void Thread::yield()
+ {
+@@ -163,30 +150,24 @@ void Thread::yield()
+ 
+     db<Thread>(TRC) << "Thread::yield(running=" << _running << ")" << endl;
+ 
+-    if(!_ready.empty()) {
+-        Thread * prev = _running;
+-        prev->_state = READY;
+-        _ready.insert(&prev->_link);
+-
+-        _running = _ready.remove()->object();
+-        _running->_state = RUNNING;
+-
+-        dispatch(prev, _running);
+-    } else
+-        idle();
++    Thread * prev = _running;
++    prev->_state = READY;
++    _ready.insert(&prev->_link);
++    _running = _ready.remove()->object();
++    _running->_state = RUNNING;
++    dispatch(prev, _running);
+ 
+     unlock();
+ }
+ 
+-
+ void Thread::exit(int status)
+ {
+     lock();
+ 
+     db<Thread>(TRC) << "Thread::exit(status=" << status << ") [running=" << running() << "]" << endl;
+ 
+-    while(_ready.empty() && !_suspended.empty())
+-        idle(); // implicit unlock();
++    while (_ready.size() == 1 && !_suspended.empty())
++        yield(); // idle thread  // implicit unlock();
+ 
+     lock();
+ 
+@@ -196,7 +177,7 @@ void Thread::exit(int status)
+         _ready.insert(&joined->_link);
+     }
+ 
+-    if(!_ready.empty()) {
++    if(_ready.size() > 1) {
+         Thread * prev = _running;
+         prev->_state = FINISHING;
+         *reinterpret_cast<int *>(prev->_stack) = status;
+@@ -220,14 +201,11 @@ void Thread::exit(int status)
+ }
+ 
+ void Thread::sleep(Queue * q) {
+-    
++
+     db<Thread>(TRC) << "Thread::sleep(running=" << running() << ",q=" << q << ")" << endl;
+ 
+     assert(locked());
+ 
+-    while (_ready.empty())
+-        idle();
+-
+     Thread * prev = running();
+     prev->_state = WAITING;
+     prev->_waiting = q;
+@@ -309,20 +287,6 @@ void Thread::dispatch(Thread * prev, Thread * next)
+     unlock();
+ }
+ 
+-
+-int Thread::idle()
+-{
+-    db<Thread>(TRC) << "Thread::idle()" << endl;
+-
+-    db<Thread>(INF) << "There are no runnable threads at the moment!" << endl;
+-    db<Thread>(INF) << "Halting the CPU ..." << endl;
+-
+-    CPU::int_enable();
+-    CPU::halt();
+-
+-    return 0;
+-}
+-
+ __END_SYS
+ 
+ // Id forwarder to the spin lock
+diff --git a/src/abstraction/thread_init.cc b/src/abstraction/thread_init.cc
+index 8a0fb90..95c7b25 100644
+--- a/src/abstraction/thread_init.cc
++++ b/src/abstraction/thread_init.cc
+@@ -3,6 +3,7 @@
+ #include <system/kmalloc.h>
+ #include <system.h>
+ #include <thread.h>
++#include <idle_thread.h>
+ #include <alarm.h>
+ 
+ __BEGIN_SYS
+@@ -17,6 +18,9 @@ void Thread::init()
+     // neither by IDLE (which has a lower priority)
+     if(preemptive)
+         _timer = new (kmalloc(sizeof(Scheduler_Timer))) Scheduler_Timer(QUANTUM, time_slicer);
++    Thread idleThread = IdleThread();
++    Thread::_idleThread = &idleThread;
++    Thread::_ready.insert(&Thread::_idleThread->_link);
+ }
+ 
+ __END_SYS
