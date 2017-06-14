@@ -84,6 +84,9 @@ public:
     static Thread * volatile self() { return running(); }
     static void yield();
     static void exit(int status = 0);
+    static void insert(Queue::element * e) {
+      _ready.insert(e);
+    }
 
 protected:
     void constructor_prolog(unsigned int stack_size);
